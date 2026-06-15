@@ -144,7 +144,7 @@ def delete_file(file_id: str, db: Session = Depends(get_db)):
 # AI TRAINING ENDPOINTS
 # ----------------------------------------------------
 
-def run_training_task(history_id: int, directory_id: Optional[int], master_id: Optional[int], content_id: Optional[int], db_session_creator):
+def run_training_task(history_id: str, directory_id: Optional[str], master_id: Optional[str], content_id: Optional[str], db_session_creator):
     db = db_session_creator()
     try:
         # If master_id is not provided, default to directory_id since Item Directory and Master Sheet are the same
@@ -173,10 +173,10 @@ def run_training_task(history_id: int, directory_id: Optional[int], master_id: O
 @app.post("/api/train")
 def train_engine(
     background_tasks: BackgroundTasks,
-    history_id: int = Form(...),
-    directory_id: Optional[int] = Form(None),
-    master_id: Optional[int] = Form(None),
-    content_id: Optional[int] = Form(None),
+    history_id: str = Form(...),
+    directory_id: Optional[str] = Form(None),
+    master_id: Optional[str] = Form(None),
+    content_id: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     # Verify history file exists
@@ -383,10 +383,10 @@ def run_generation_task(
 @app.post("/api/generate")
 def start_generation(
     skus_input: str = Form(...),
-    directory_id: int = Form(...),
-    master_id: Optional[int] = Form(None),
-    content_id: int = Form(...),
-    template_id: int = Form(...),
+    directory_id: str = Form(...),
+    master_id: Optional[str] = Form(None),
+    content_id: str = Form(...),
+    template_id: str = Form(...),
     background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db)
 ):
@@ -401,7 +401,12 @@ def start_generation(
     tmp_f = db.query(SourceFile).filter(SourceFile.id == template_id).first()
     
     if not (dir_f and mst_f and cnt_f and tmp_f):
-        raise HTTPException(status_code=404, detail="One or more required sheets/templates was not found.")
+        missing = []
+        if not dir_f: missing.append(f"Item Directory (id={directory_id})")
+        if not mst_f: missing.append(f"Master Sheet (id={master_id})")
+        if not cnt_f: missing.append(f"Content Sheet (id={content_id})")
+        if not tmp_f: missing.append(f"Amazon Template (id={template_id})")
+        raise HTTPException(status_code=404, detail=f"Files not found in database: {', '.join(missing)}")
         
     # Create background task
     task_id = str(uuid.uuid4())

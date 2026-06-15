@@ -385,10 +385,13 @@ export default function Home() {
         setCurrentTaskId(data.task_id);
         setActiveTab("logs"); // Switch to live logs tab
       } else {
-        alert("Generation failed to start.");
+        const errData = await res.json().catch(() => null);
+        const msg = errData?.detail || `Server error ${res.status}`;
+        alert(`Generation failed: ${msg}`);
       }
     } catch (err) {
       console.error(err);
+      alert("Network error — could not reach the backend.");
     } finally {
       setLoading((prev: any) => ({ ...prev, generate: false }));
     }
