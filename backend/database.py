@@ -33,6 +33,9 @@ class MongoField:
         return (self.name, -1)
     def asc(self):
         return (self.name, 1)
+    def like(self, pattern):
+        regex_pattern = pattern.replace("%", ".*").replace("_", ".")
+        return (self.name, {"$regex": regex_pattern, "$options": "i"})
 
 def to_mongo_id(id_val):
     if isinstance(id_val, str) and len(id_val) == 24:
