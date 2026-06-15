@@ -1,9 +1,8 @@
-from sqlalchemy.orm import Session
 from ..models import AdminRule, HardcodedDefault, LearnedMapping, ValueMapping
 
 class RuleEngine:
     @classmethod
-    def resolve_attribute_value(cls, db: Session, amazon_attr: str, item_data: dict, product_type: str = None, brand: str = None, category: str = None) -> tuple:
+    def resolve_attribute_value(cls, db, amazon_attr: str, item_data: dict, product_type: str = None, brand: str = None, category: str = None) -> tuple:
         """
         Resolves the value of an Amazon attribute for a given item.
         Returns:

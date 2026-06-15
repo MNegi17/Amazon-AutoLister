@@ -37,7 +37,15 @@ OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./data/outputs")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ----------------------------------------------------
+# Health check
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "Amazon Auto Lister API"}
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 # FILE UPLOAD & MANAGEMENT ENDPOINTS
 # ----------------------------------------------------
 

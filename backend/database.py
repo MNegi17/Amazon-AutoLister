@@ -1,6 +1,7 @@
 import os
 import urllib.parse
 from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 from bson import ObjectId
 
 # Load MongoDB connection URI
@@ -14,7 +15,9 @@ db_name = "amazon_autolister"
 try:
     parsed = urllib.parse.urlparse(MONGODB_URI)
     if parsed.path and parsed.path != "/":
-        db_name = parsed.path.strip("/")
+        path_clean = parsed.path.strip("/").split("?")[0]
+        if path_clean:
+            db_name = path_clean
 except Exception:
     pass
 
@@ -134,6 +137,17 @@ class MongoSession:
     def rollback(self):
         self.pending_add = []
         self.pending_delete = []
+        
+    def refresh(self, obj):
+        """Re-fetch the object from MongoDB to get latest data (e.g. auto-generated _id)"""
+        collection = self.db[obj.__tablename__]
+        doc_id = to_mongo_id(getattr(obj, "id", None))
+        if doc_id:
+            doc = collection.find_one({"_id": doc_id})
+            if doc:
+                refreshed = obj.__class__.from_mongo(doc)
+                for key, val in refreshed.__dict__.items():
+                    setattr(obj, key, val)
         
     def close(self):
         pass

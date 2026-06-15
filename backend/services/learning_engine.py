@@ -1,7 +1,6 @@
 import pandas as pd
 import openpyxl
 from collections import defaultdict
-from sqlalchemy.orm import Session
 from ..models import LearnedMapping, ValueMapping, HardcodedDefault
 from .excel_processor import ExcelProcessor
 
@@ -72,7 +71,7 @@ class LearningEngine:
         return data
 
     @classmethod
-    def learn_from_historical_listing(cls, db: Session, history_filepath: str, item_directory_path: str = None, master_sheet_path: str = None, content_sheet_path: str = None):
+    def learn_from_historical_listing(cls, db, history_filepath: str, item_directory_path: str = None, master_sheet_path: str = None, content_sheet_path: str = None):
         """
         Analyzes a completed Amazon listing Excel file and matches it against source sheets to learn mappings.
         """

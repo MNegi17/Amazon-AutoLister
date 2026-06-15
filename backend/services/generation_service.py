@@ -2,7 +2,6 @@ import os
 import openpyxl
 import logging
 from collections import defaultdict
-from sqlalchemy.orm import Session
 from ..models import HardcodedDefault, LearnedMapping
 from .excel_processor import ExcelProcessor
 from .rule_engine import RuleEngine
@@ -26,7 +25,7 @@ class GenerationService:
         return sku_str
 
     @classmethod
-    def generate_listings(cls, db: Session, skus_input: str, item_directory_path: str, master_sheet_path: str, content_sheet_path: str, template_path: str, output_path: str, task_logger=None):
+    def generate_listings(cls, db, skus_input: str, item_directory_path: str, master_sheet_path: str, content_sheet_path: str, template_path: str, output_path: str, task_logger=None):
         """
         Main runner function to generate Amazon listing flat files.
         """
