@@ -22,7 +22,7 @@ except Exception:
     pass
 
 print(f"🔌 Connecting to MongoDB Database: {db_name}")
-mongo_client = MongoClient(MONGODB_URI)
+mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=10000)
 mongo_db = mongo_client[db_name]
 
 class MongoField:

@@ -16,7 +16,10 @@ from .seed_manager import seed_database
 
 # Initialize database tables
 Base.metadata.create_all(bind=engine)
-seed_database()
+try:
+    seed_database()
+except Exception as _seed_err:
+    print(f"⚠️  Seed skipped (will retry on next operation): {_seed_err}")
 
 app = FastAPI(title="Amazon Auto Lister API", version="1.0.0")
 
