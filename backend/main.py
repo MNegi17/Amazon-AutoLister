@@ -335,21 +335,30 @@ def run_generation_task(
     output_path: str,
     db_session_creator
 ):
+    import datetime
     db = db_session_creator()
     task = db.query(GenerationTask).filter(GenerationTask.id == task_id).first()
-    
+
+    if task is None:
+        print(f"[ERROR] run_generation_task: task {task_id} not found in DB — aborting.")
+        db.close()
+        return
+
     logs = []
     def task_log(msg):
         logs.append(msg)
         task.log_messages = "\n".join(logs)
+        # CRITICAL: must re-add task so MongoSession knows to persist changes
+        db.add(task)
         db.commit()
-        
+
     try:
         task.status = "processing"
-        task.progress = 20
-        task_log("🚀 Starting listing generation engine...")
+        task.progress = 10
+        db.add(task)
         db.commit()
-        
+        task_log("🚀 Starting listing generation engine...")
+
         # Execute Generation Service
         result = GenerationService.generate_listings(
             db=db,
@@ -361,24 +370,25 @@ def run_generation_task(
             output_path=output_path,
             task_logger=task_log
         )
-        
+
         task.progress = 100
         task.status = "completed"
         task.output_file_path = output_path
         task.validation_report = json.dumps(result["validation"])
+        task.completed_at = datetime.datetime.utcnow()
         task_log("🎉 All listings generated! Your file is ready to download.")
-        
+
     except Exception as e:
+        import traceback
         task.status = "failed"
         task.progress = 100
-        task_log(f"ERROR: {str(e)}")
-        import traceback
-        task_log(traceback.format_exc())
-    finally:
-        import datetime
         task.completed_at = datetime.datetime.utcnow()
+        task_log(f"❌ ERROR: {str(e)}\n{traceback.format_exc()}")
+    finally:
+        db.add(task)
         db.commit()
         db.close()
+
 
 @app.post("/api/generate")
 def start_generation(
