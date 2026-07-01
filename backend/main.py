@@ -32,7 +32,7 @@ ALLOWED_ORIGINS = [
 ]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=False,   # Must be False when allow_origins includes "*" or wildcards
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,18 +57,15 @@ def health():
     return {"status": "ok"}
 
 @app.get("/api/debug")
-def debug_db():
-    """Debug endpoint to check MongoDB connectivity"""
-    from .database import mongo_db, MONGODB_URI
+def debug_db(db: Session = Depends(get_db)):
+    """Debug endpoint to check database connectivity"""
     try:
-        # Test connection with a ping
-        mongo_db.client.admin.command('ping')
-        collections = mongo_db.list_collection_names()
+        from sqlalchemy import text
+        # Test connection with a simple SELECT 1
+        db.execute(text("SELECT 1"))
         return {
             "status": "connected",
-            "db_name": mongo_db.name,
-            "collections": collections,
-            "uri_prefix": MONGODB_URI[:30] + "..." if MONGODB_URI else "not set"
+            "db_engine": str(engine.url.drivername)
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -100,7 +97,7 @@ async def upload_file(
     )
     db.add(source_file)
     db.commit()
-    # No db.refresh() needed — commit() already sets source_file.id from insert_one result
+    db.refresh(source_file)
     
     import datetime
     return {
@@ -131,7 +128,7 @@ def get_files(db: Session = Depends(get_db)):
     return grouped
 
 @app.delete("/api/files/{file_id}")
-def delete_file(file_id: str, db: Session = Depends(get_db)):
+def delete_file(file_id: int, db: Session = Depends(get_db)):
     file_record = db.query(SourceFile).filter(SourceFile.id == file_id).first()
     if not file_record:
         raise HTTPException(status_code=404, detail="File not found")
@@ -151,7 +148,7 @@ def delete_file(file_id: str, db: Session = Depends(get_db)):
 # AI TRAINING ENDPOINTS
 # ----------------------------------------------------
 
-def run_training_task(history_id: str, directory_id: Optional[str], master_id: Optional[str], content_id: Optional[str], db_session_creator):
+def run_training_task(history_id: int, directory_id: Optional[int], master_id: Optional[int], content_id: Optional[int], db_session_creator):
     db = db_session_creator()
     history_file = None
     dir_file = None
@@ -204,10 +201,10 @@ def run_training_task(history_id: str, directory_id: Optional[str], master_id: O
 @app.post("/api/train")
 def train_engine(
     background_tasks: BackgroundTasks,
-    history_id: str = Form(...),
-    directory_id: Optional[str] = Form(None),
-    master_id: Optional[str] = Form(None),
-    content_id: Optional[str] = Form(None),
+    history_id: int = Form(...),
+    directory_id: Optional[int] = Form(None),
+    master_id: Optional[int] = Form(None),
+    content_id: Optional[int] = Form(None),
     db: Session = Depends(get_db)
 ):
     # Verify history file exists
@@ -257,7 +254,7 @@ def get_mappings(db: Session = Depends(get_db)):
     }
 
 @app.post("/api/mappings/column/{mapping_id}/toggle")
-def toggle_column_mapping(mapping_id: str, db: Session = Depends(get_db)):
+def toggle_column_mapping(mapping_id: int, db: Session = Depends(get_db)):
     m = db.query(LearnedMapping).filter(LearnedMapping.id == mapping_id).first()
     if not m:
         raise HTTPException(status_code=404, detail="Mapping not found")
@@ -282,7 +279,7 @@ def create_or_override_column_mapping(
     return {"status": "success"}
 
 @app.delete("/api/mappings/value/{mapping_id}")
-def delete_value_mapping(mapping_id: str, db: Session = Depends(get_db)):
+def delete_value_mapping(mapping_id: int, db: Session = Depends(get_db)):
     v = db.query(ValueMapping).filter(ValueMapping.id == mapping_id).first()
     if not v:
         raise HTTPException(status_code=404, detail="Mapping not found")
@@ -344,7 +341,7 @@ def create_rule(
     return {"status": "success", "id": r.id}
 
 @app.delete("/api/settings/rules/{rule_id}")
-def delete_rule(rule_id: str, db: Session = Depends(get_db)):
+def delete_rule(rule_id: int, db: Session = Depends(get_db)):
     r = db.query(AdminRule).filter(AdminRule.id == rule_id).first()
     if not r:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -440,10 +437,10 @@ def run_generation_task(
 @app.post("/api/generate")
 def start_generation(
     skus_input: str = Form(...),
-    directory_id: str = Form(...),
-    master_id: Optional[str] = Form(None),
-    content_id: str = Form(...),
-    template_id: str = Form(...),
+    directory_id: int = Form(...),
+    master_id: Optional[int] = Form(None),
+    content_id: int = Form(...),
+    template_id: int = Form(...),
     background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db)
 ):

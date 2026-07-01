@@ -1,142 +1,66 @@
 import datetime
 import uuid
-from .database import MongoField, Base
+from sqlalchemy import Column, String, Integer, Float, Boolean, DateTime, Text
+from .database import Base
 
-class ModelBase:
-    __tablename__ = ""
-    
-    def __init__(self, **kwargs):
-        for k, v in kwargs.items():
-            setattr(self, k, v)
-            
-    def to_mongo(self):
-        d = {}
-        for k, v in self.__dict__.items():
-            if k.startswith("_"):
-                continue
-            d[k] = v
-            
-        # Map 'id' attribute to '_id' key for MongoDB
-        if "id" in d:
-            d["_id"] = d.pop("id")
-        return d
-        
-    @classmethod
-    def from_mongo(cls, doc):
-        if not doc:
-            return None
-        d = doc.copy()
-        # Map '_id' back to 'id' string representation
-        if "_id" in d:
-            d["id"] = str(d.pop("_id"))
-        return cls(**d)
-
-class SourceFile(ModelBase):
+class SourceFile(Base):
     __tablename__ = "source_files"
     
-    id = MongoField("id")
-    file_type = MongoField("file_type")
-    filename = MongoField("filename")
-    filepath = MongoField("filepath")
-    uploaded_at = MongoField("uploaded_at")
-    
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        if not hasattr(self, "uploaded_at"):
-            self.uploaded_at = datetime.datetime.utcnow()
+    id = Column(Integer, primary_key=True, index=True)
+    file_type = Column(String(50), nullable=False) # item_directory, master_sheet, content_sheet, amazon_template, historical_listing
+    filename = Column(String(255), nullable=False)
+    filepath = Column(String(512), nullable=False)
+    uploaded_at = Column(DateTime, default=datetime.datetime.utcnow)
 
-class LearnedMapping(ModelBase):
+class LearnedMapping(Base):
     __tablename__ = "learned_mappings"
     
-    id = MongoField("id")
-    amazon_attribute = MongoField("amazon_attribute")
-    internal_column = MongoField("internal_column")
-    confidence_score = MongoField("confidence_score")
-    is_active = MongoField("is_active")
-    updated_at = MongoField("updated_at")
-    
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        if not hasattr(self, "confidence_score"):
-            self.confidence_score = 1.0
-        if not hasattr(self, "is_active"):
-            self.is_active = True
-        if not hasattr(self, "updated_at"):
-            self.updated_at = datetime.datetime.utcnow()
+    id = Column(Integer, primary_key=True, index=True)
+    amazon_attribute = Column(String(255), nullable=False, index=True)
+    internal_column = Column(String(255), nullable=False)
+    confidence_score = Column(Float, default=1.0)
+    is_active = Column(Boolean, default=True)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
-class ValueMapping(ModelBase):
+class ValueMapping(Base):
     __tablename__ = "value_mappings"
     
-    id = MongoField("id")
-    amazon_attribute = MongoField("amazon_attribute")
-    internal_value = MongoField("internal_value")
-    amazon_value = MongoField("amazon_value")
-    confidence_score = MongoField("confidence_score")
-    updated_at = MongoField("updated_at")
-    
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        if not hasattr(self, "confidence_score"):
-            self.confidence_score = 1.0
-        if not hasattr(self, "updated_at"):
-            self.updated_at = datetime.datetime.utcnow()
+    id = Column(Integer, primary_key=True, index=True)
+    amazon_attribute = Column(String(255), nullable=False, index=True)
+    internal_value = Column(String(255), nullable=False)
+    amazon_value = Column(String(255), nullable=False)
+    confidence_score = Column(Float, default=1.0)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
-class HardcodedDefault(ModelBase):
+class HardcodedDefault(Base):
     __tablename__ = "hardcoded_defaults"
     
-    id = MongoField("id")
-    amazon_attribute = MongoField("amazon_attribute")
-    default_value = MongoField("default_value")
-    is_active = MongoField("is_active")
-    updated_at = MongoField("updated_at")
-    
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        if not hasattr(self, "is_active"):
-            self.is_active = True
-        if not hasattr(self, "updated_at"):
-            self.updated_at = datetime.datetime.utcnow()
+    id = Column(Integer, primary_key=True, index=True)
+    amazon_attribute = Column(String(255), nullable=False, unique=True, index=True)
+    default_value = Column(String(512), nullable=False)
+    is_active = Column(Boolean, default=True)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
-class AdminRule(ModelBase):
+class AdminRule(Base):
     __tablename__ = "admin_rules"
     
-    id = MongoField("id")
-    scope = MongoField("scope")
-    scope_value = MongoField("scope_value")
-    amazon_attribute = MongoField("amazon_attribute")
-    rule_type = MongoField("rule_type")
-    rule_value = MongoField("rule_value")
-    updated_at = MongoField("updated_at")
-    
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        if not hasattr(self, "updated_at"):
-            self.updated_at = datetime.datetime.utcnow()
+    id = Column(Integer, primary_key=True, index=True)
+    scope = Column(String(50), nullable=False) # global, category, brand, product_type
+    scope_value = Column(String(255), nullable=True) # e.g. "SHIRT", "Purple United Kids"
+    amazon_attribute = Column(String(255), nullable=False, index=True)
+    rule_type = Column(String(50), nullable=False) # hardcoded, copy_column, value_translate
+    rule_value = Column(String(512), nullable=False)
+    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
 
-class GenerationTask(ModelBase):
+class GenerationTask(Base):
     __tablename__ = "generation_tasks"
     
-    id = MongoField("id")
-    skus_input = MongoField("skus_input")
-    status = MongoField("status")
-    progress = MongoField("progress")
-    log_messages = MongoField("log_messages")
-    validation_report = MongoField("validation_report")
-    output_file_path = MongoField("output_file_path")
-    created_at = MongoField("created_at")
-    completed_at = MongoField("completed_at")
-    
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        if not hasattr(self, "id"):
-            self.id = str(uuid.uuid4())
-        if not hasattr(self, "status"):
-            self.status = "pending"
-        if not hasattr(self, "progress"):
-            self.progress = 0
-        if not hasattr(self, "log_messages"):
-            self.log_messages = ""
-        if not hasattr(self, "validation_report"):
-            self.validation_report = "{}"
-        if not hasattr(self, "created_at"):
-            self.created_at = datetime.datetime.utcnow()
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    skus_input = Column(Text, nullable=True)
+    status = Column(String(50), default="pending") # pending, processing, completed, failed
+    progress = Column(Integer, default=0) # 0 to 100
+    log_messages = Column(Text, default="")
+    validation_report = Column(Text, default="{}") # JSON string
+    output_file_path = Column(String(512), nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
