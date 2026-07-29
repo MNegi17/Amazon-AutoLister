@@ -52,6 +52,15 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 def root():
     return {"status": "ok", "service": "Amazon Auto Lister API"}
 
+# Version/build check — update this timestamp whenever deploying to confirm live code
+@app.get("/version")
+def version():
+    return {
+        "build": "2026-07-29-v5",
+        "matching": "item_color_column_exact",
+        "fixes": ["sku_matching", "department_name", "target_gender", "bottoms_size", "material"]
+    }
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
