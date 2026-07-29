@@ -246,13 +246,19 @@ class GenerationService:
             else:
                 log(f"⚠ No products found matching '{token}' — check spelling or Item Directory.")
 
-        # De-duplicate by Item Color value (not barcode)
+        # De-duplicate by barcode (ITEM CODE) — unique per size+color row
+        # DO NOT deduplicate by Item Color — that would collapse all sizes to 1
         unique_children = []
-        seen_item_colors = set()
+        seen_barcodes = set()
         for c in matched_child_items:
-            ic_key = str(c.get(item_color_col, "") or c.get(barcode_col, id(c))).strip()
-            if ic_key not in seen_item_colors:
-                seen_item_colors.add(ic_key)
+            # Use barcode as unique key; fall back to Item Color + SIZE if no barcode
+            barcode_key = str(c.get(barcode_col, "") or "").strip()
+            if not barcode_key:
+                ic = str(c.get(item_color_col, "") or "").strip()
+                sz = str(c.get("SIZE", "") or "").strip()
+                barcode_key = f"{ic}__{sz}"
+            if barcode_key not in seen_barcodes:
+                seen_barcodes.add(barcode_key)
                 unique_children.append(c)
                 
         log(f"✔ Found {len(unique_children)} matching product variant(s) across all style codes.")
@@ -511,8 +517,17 @@ class GenerationService:
             # B. Generate Child Rows
             for child_idx, child_flat in enumerate(children_data):
                 child_row = {}
-                # Use the Item Color value as the child SKU (e.g. "PGDNJS003295-LT. BLUE")
-                child_sku_val = child_flat.get("__child_sku__") or child_flat.get(item_color_col) or f"{style_code}-CHILD-{child_idx}"
+                # Child SKU = barcode (ITEM CODE) — unique per size+color row
+                # Fall back to ItemColor-SIZE if no barcode
+                barcode_val = str(child_flat.get(barcode_col, "") or "").strip()
+                item_color_val_child = str(child_flat.get(item_color_col, "") or "").strip()
+                size_val_child = str(child_flat.get("SIZE", "") or "").strip()
+                if barcode_val:
+                    child_sku_val = barcode_val
+                elif item_color_val_child and size_val_child:
+                    child_sku_val = f"{item_color_val_child}-{size_val_child}"
+                else:
+                    child_sku_val = child_flat.get("__child_sku__") or f"{style_code}-CHILD-{child_idx}"
                 child_sku_val = str(child_sku_val).strip()
 
                 child_row["product_type#1.value"] = resolved_ptd

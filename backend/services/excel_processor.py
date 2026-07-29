@@ -1,6 +1,7 @@
 import openpyxl
 from openpyxl.utils import get_column_letter
 import re
+import shutil
 
 class ExcelProcessor:
     @staticmethod
@@ -43,8 +44,7 @@ class ExcelProcessor:
         if 'Data Definitions' in wb.sheetnames:
             sheet_dd = wb['Data Definitions']
             rows_dd = list(sheet_dd.iter_rows(values_only=True))
-            # Find the header row (Group Name, Field Name, Local Label Name, etc.)
-            header_row_idx = 1 # 0-based
+            header_row_idx = 1
             for idx, r in enumerate(rows_dd[:5]):
                 if r and 'Field Name' in r and 'Required?' in r:
                     header_row_idx = idx
@@ -76,13 +76,10 @@ class ExcelProcessor:
             sheet_t = wb['Template']
             rows_t = list(sheet_t.iter_rows(max_row=10, values_only=True))
             
-            # Identify settings, labels, tech_names
-            # Defaults if we can't parse them from settings:
-            label_row_idx = 3 # 0-based (Row 4)
-            attr_row_idx = 4  # 0-based (Row 5)
-            data_row_idx = 6  # 0-based (Row 7)
+            label_row_idx = 3
+            attr_row_idx = 4
+            data_row_idx = 6
             
-            # Row 1 often contains settings
             if rows_t and rows_t[0] and rows_t[0][0] and "settings=" in str(rows_t[0][0]):
                 settings_str = str(rows_t[0][0])
                 label_match = re.search(r"labelRow=(\d+)", settings_str)
@@ -111,11 +108,9 @@ class ExcelProcessor:
                     label = str(labels[col_idx]).strip() if col_idx < len(labels) and labels[col_idx] else ""
                     col_letter = get_column_letter(col_idx + 1)
                     
-                    # Merge with Data Definitions
                     def_info = definitions_map.get(tech_name, {})
                     required = def_info.get("required", "Optional")
                     
-                    # Fetch valid values matching by local label name or tech name
                     clean_lbl = cls.clean_label(label)
                     allowed_values = valid_values_map.get(clean_lbl, None)
                     if not allowed_values:
@@ -137,14 +132,12 @@ class ExcelProcessor:
             sheet_ptd = wb['AttributePTDMAP']
             rows_ptd = list(sheet_ptd.iter_rows(values_only=True))
             if rows_ptd:
-                # Row 1 contains Product Types (PTDs) starting from col 2 (index 1)
                 header = rows_ptd[0]
                 ptds = []
                 for col_idx in range(1, len(header)):
                     if header[col_idx]:
                         ptds.append((col_idx, str(header[col_idx]).strip()))
                 
-                # Rows 2 onwards contain attribute names in col 1 and applicability (1) in PTD columns
                 for r in rows_ptd[1:]:
                     if r and r[0]:
                         attr_name = str(r[0]).strip()
@@ -161,3 +154,41 @@ class ExcelProcessor:
             "valid_values": valid_values_map,
             "sheet_info": sheet_info
         }
+
+    @classmethod
+    def write_template(cls, template_path: str, output_path: str, generated_rows: list, sheet_info: dict):
+        """
+        Copies the Amazon template file and writes generated_rows into the Template sheet
+        starting at data_row. Each row is a dict of {tech_name: value}.
+        """
+        # Copy template to output path — preserves all formatting, header rows, sheets
+        shutil.copy2(template_path, output_path)
+
+        wb = openpyxl.load_workbook(output_path)
+        if 'Template' not in wb.sheetnames:
+            wb.close()
+            raise ValueError("Template sheet not found in Amazon template file.")
+
+        ws = wb['Template']
+
+        attr_row_num = sheet_info.get("attribute_row", 5)
+        data_row_start = sheet_info.get("data_row", 7)
+
+        # Build tech_name -> 1-based column index from the attribute row
+        col_map = {}
+        for cell in ws[attr_row_num]:
+            if cell.value:
+                col_map[str(cell.value).strip()] = cell.column
+
+        # Write each generated row into the template
+        for row_offset, row_data in enumerate(generated_rows):
+            excel_row = data_row_start + row_offset
+            for tech_name, value in row_data.items():
+                if tech_name.startswith("__"):
+                    continue  # skip internal keys like __child_sku__
+                col_idx = col_map.get(tech_name)
+                if col_idx is not None and value is not None:
+                    ws.cell(row=excel_row, column=col_idx, value=str(value))
+
+        wb.save(output_path)
+        wb.close()
