@@ -184,132 +184,75 @@ class GenerationService:
         input_tokens = [x.strip() for x in skus_input.replace("\n", ",").split(",") if x.strip()]
         log(f"🔍 Searching for {len(input_tokens)} item code(s)/variant(s): {', '.join(input_tokens)}")
         
-        sku_col = None
-        style_col = None
-        item_color_col = None
-        item_name_col = None
         sample_row = item_dir[0]
+        item_color_col = None   # e.g. "Item Color" = "PGDNJS003295-LT. BLUE"
+        item_name_col = None    # e.g. "ITEM NAME"  = "PGDNJS003295"
+        barcode_col = None      # e.g. "ITEM CODE"  = 8905120616853
+        color_col = None        # e.g. "COLOR"      = "LT. BLUE"
 
         for k in sample_row.keys():
             k_clean = str(k).strip().lower()
-            if k_clean in ["item color", "item_color", "itemcolor"]:
-                item_color_col = k
-            elif k_clean in ["item name", "item_name", "itemname", "style_code", "style code", "style"]:
+            if k_clean in ["item color", "item_color", "item color_1"]:
+                if item_color_col is None:  # prefer first occurrence
+                    item_color_col = k
+            elif k_clean in ["item name", "item_name"]:
                 item_name_col = k
+            elif k_clean in ["item code", "item_code", "itemcode"]:
+                barcode_col = k
+            elif k_clean in ["color", "colour"]:
+                color_col = k
 
-        # --- Step 0: Database-learned mappings lookup ---
+        # Primary match column = Item Color (contains full "STYLECODE-COLOR" string)
+        # Primary style column  = ITEM NAME  (contains just "STYLECODE")
+        # Child SKU to write    = Item Color value (not the barcode)
         from ..models import LearnedMapping
-        sku_attrs = [
-            "contribution_sku#1.value",
-            "amzn1.volt.ca.product_id_value",
-            "part_number[marketplace_id=A21TJRUUN4KGV]#1.value"
-        ]
-        for attr in sku_attrs:
-            m_sku = db.query(LearnedMapping).filter(
-                LearnedMapping.amazon_attribute == attr,
-                LearnedMapping.is_active == True
-            ).first()
-            if m_sku:
-                internal_col = m_sku.internal_column
-                col_key = internal_col.split(".", 1)[1] if "." in internal_col else internal_col
-                if col_key in sample_row:
-                    sku_col = col_key
-                    break
 
-        m_style = db.query(LearnedMapping).filter(
-            LearnedMapping.amazon_attribute.like("%model_number%"),
-            LearnedMapping.is_active == True
-        ).first()
-        if m_style:
-            internal_col = m_style.internal_column
-            col_key = internal_col.split(".", 1)[1] if "." in internal_col else internal_col
-            if col_key in sample_row:
-                style_col = col_key
-
-        if not sku_col:
-            for k in sample_row.keys():
-                k_clean = str(k).strip().lower()
-                if k_clean in ["sku", "item_code", "item code", "itemcode"]:
-                    sku_col = k
-                    break
-
-        if not sku_col:
-            sku_pattern = re.compile(r'^[A-Z]{2,}[0-9]{4,}-[A-Z]', re.IGNORECASE)
-            for k in sample_row.keys():
-                v = sample_row.get(k)
-                if v and sku_pattern.match(str(v).strip()):
-                    sku_col = k
-                    break
-
-        if not sku_col:
-            sku_col = list(sample_row.keys())[0]
-
-        if not style_col:
-            style_col = item_name_col
-        if not style_col:
-            for k in sample_row.keys():
-                k_clean = str(k).strip().lower()
-                if k_clean in ["style_code", "style code", "style", "style_no", "style no", "article", "article_no", "article no"]:
-                    style_col = k
-                    break
-
-        # PRECISION ITEM COLOR MATCHING ENGINE
+        # ─── PRECISION ITEM COLOR MATCHING ENGINE ───────────────────────────────
+        # We match ONLY on the "Item Color" column (e.g. "PGDNJS003295-LT. BLUE").
+        # A token like "PGDNJS003295-BLACK" must match ONLY rows whose Item Color
+        # normalizes to exactly that string — never "PGDNJS003295-LT. BLUE".
         matched_child_items = []
         for token in input_tokens:
             token_str = str(token).strip()
             if not token_str:
                 continue
-            token_upper = token_str.upper()
-            token_clean = re.sub(r'[\.\s\-_]+', ' ', token_upper).strip()
-            
+            token_clean = re.sub(r'[\s]+', ' ', token_str.upper().strip())
+
             matches = []
             for row in item_dir:
-                # 1. Exact match on 'Item Color' column (e.g. "PBDNJA003399-BLUE" vs "PBDNJA003399-BLUE")
-                ic_val = str(row.get(item_color_col, "")).strip() if item_color_col else ""
-                if ic_val:
-                    ic_clean = re.sub(r'[\.\s\-_]+', ' ', ic_val.upper()).strip()
-                    if token_clean == ic_clean:
-                        matches.append(row)
-                        continue
+                matched = False
 
-                # 2. Match SKU / ITEM CODE column
-                sku_val = str(row.get(sku_col, "")).strip() if sku_col else ""
-                if sku_val:
-                    sku_clean = re.sub(r'[\.\s\-_]+', ' ', sku_val.upper()).strip()
-                    if token_clean == sku_clean or sku_clean.startswith(token_clean + " "):
-                        matches.append(row)
-                        continue
+                # Check 1 — Exact match on Item Color column (primary)
+                if item_color_col:
+                    ic_val = str(row.get(item_color_col, "") or "").strip()
+                    if ic_val:
+                        ic_norm = re.sub(r'[\s]+', ' ', ic_val.upper())
+                        if token_clean == ic_norm:
+                            matched = True
 
-                # 3. Match Item Name / Style Code column (for style-only requests like "PGDNJS003295")
-                in_val = str(row.get(style_col, "")).strip() if style_col else ""
-                if in_val:
-                    in_clean = re.sub(r'[\.\s\-_]+', ' ', in_val.upper()).strip()
-                    if token_clean == in_clean:
-                        matches.append(row)
-                        continue
+                # Check 2 — Exact match on ITEM NAME (style-only tokens like "PGDNJS003295")
+                if not matched and item_name_col and "-" not in token_str:
+                    in_val = str(row.get(item_name_col, "") or "").strip()
+                    if in_val:
+                        in_norm = re.sub(r'[\s]+', ' ', in_val.upper())
+                        if token_clean == in_norm:
+                            matched = True
 
-                # 4. Search all columns for exact normalized match
-                found = False
-                for col_name, val in row.items():
-                    if val is not None:
-                        v_clean = re.sub(r'[\.\s\-_]+', ' ', str(val).upper()).strip()
-                        if token_clean == v_clean:
-                            found = True
-                            break
-                if found:
+                if matched:
                     matches.append(row)
-                        
+
             if matches:
                 matched_child_items.extend(matches)
             else:
                 log(f"⚠ No products found matching '{token}' — check spelling or Item Directory.")
-                
+
+        # De-duplicate by Item Color value (not barcode)
         unique_children = []
-        seen_child_skus = set()
+        seen_item_colors = set()
         for c in matched_child_items:
-            sku_val = c.get(sku_col)
-            if sku_val not in seen_child_skus:
-                seen_child_skus.add(sku_val)
+            ic_key = str(c.get(item_color_col, "") or c.get(barcode_col, id(c))).strip()
+            if ic_key not in seen_item_colors:
+                seen_item_colors.add(ic_key)
                 unique_children.append(c)
                 
         log(f"✔ Found {len(unique_children)} matching product variant(s) across all style codes.")
@@ -340,76 +283,50 @@ class GenerationService:
 
         joined_items = []
         for c_row in unique_children:
-            sku_val = str(c_row.get(sku_col)).strip()
-            sku_val_lower = sku_val.lower()
-            
-            sku_for_style = sku_val
-            if learned_sku_col and c_row.get(learned_sku_col) is not None:
-                sku_for_style = str(c_row.get(learned_sku_col)).strip()
-                
-            style_val = None
-            if style_col:
-                val = c_row.get(style_col)
-                if val is not None and str(val).strip().lower() not in ["", "(nil)", "nil", "n/a", "nan"]:
-                    style_val = str(val).strip()
-            
-            if not style_val:
-                extracted = cls.extract_style_code(sku_for_style)
-                found_col = None
-                for k, v in c_row.items():
-                    if v is not None and str(v).strip().lower() == extracted.lower():
-                        found_col = k
-                        break
-                if found_col:
-                    style_val = str(c_row.get(found_col)).strip()
-                else:
-                    style_val = extracted
-            
-            is_barcode = style_val.isdigit() and len(style_val) in [12, 13, 14]
-            if style_val == sku_val or is_barcode:
-                best_style = None
-                for k, v in c_row.items():
-                    if v is not None and "-" in str(v):
-                        v_str = str(v).strip()
-                        parts = [x for x in v_str.replace("_", "-").split("-") if x]
-                        if parts:
-                            possible_style = parts[0].strip()
-                            matched_any = False
-                            for k2, v2 in c_row.items():
-                                if v2 is not None and str(v2).strip().lower() == possible_style.lower():
-                                    style_val = str(v2).strip()
-                                    matched_any = True
-                                    break
-                            if matched_any:
-                                best_style = style_val
-                                break
-                            elif not best_style:
-                                if " " not in possible_style:
-                                    best_style = possible_style
-                if best_style:
-                    style_val = best_style
-            
-            style_val_lower = style_val.lower() if style_val else None
-            
+            # The "Item Color" value (e.g. "PGDNJS003295-LT. BLUE") is the child SKU
+            item_color_val = str(c_row.get(item_color_col, "") or "").strip()
+
+            # The "ITEM NAME" value (e.g. "PGDNJS003295") is the style / parent group
+            style_val = str(c_row.get(item_name_col, "") or "").strip()
+            if not style_val or style_val.lower() in ["(nil)", "nil", "n/a", "nan", ""]:
+                # fall back to first part of Item Color
+                style_val = item_color_val.split("-")[0] if "-" in item_color_val else item_color_val
+
+            # Child SKU = Item Color (e.g. "PGDNJS003295-LT. BLUE")
+            child_sku = item_color_val if item_color_val else str(c_row.get(barcode_col, "")).strip()
+
+            style_val_lower = style_val.lower()
+            child_sku_lower = child_sku.lower()
+
             flat_item = dict(c_row)
-            
-            m_matched = master_index.get(sku_val_lower) or (master_index.get(style_val_lower) if style_val_lower else None)
-            if m_matched:
-                for k, v in m_matched.items():
-                    if k not in flat_item or flat_item[k] is None:
-                        flat_item[k] = v
-                        
-            c_matched = content_index.get(sku_val_lower) or (content_index.get(style_val_lower) if style_val_lower else None)
+            # Inject canonical SKU so rule engine can use it
+            flat_item["__child_sku__"] = child_sku
+
+            # Enrich from content sheet by Item Color or style
+            c_matched = (
+                content_index.get(child_sku_lower)
+                or content_index.get(style_val_lower)
+            )
             if c_matched:
                 for k, v in c_matched.items():
                     if k not in flat_item or flat_item[k] is None:
                         flat_item[k] = v
-                        
-            joined_items.append((sku_val, style_val, flat_item))
 
-        # 3. Group by Style Code to establish Parent-Child structures
+            # Enrich from master sheet
+            m_matched = (
+                master_index.get(child_sku_lower)
+                or master_index.get(style_val_lower)
+            )
+            if m_matched:
+                for k, v in m_matched.items():
+                    if k not in flat_item or flat_item[k] is None:
+                        flat_item[k] = v
+
+            joined_items.append((child_sku, style_val, flat_item))
+
+        # 3. Group by ITEM NAME (style code) — one parent per style, children = all requested colors
         style_groups = defaultdict(list)
-        for sku, style, flat_data in joined_items:
+        for child_sku, style, flat_data in joined_items:
             style_groups[style].append(flat_data)
             
         # 4. Generate Rows for the Amazon Template
@@ -594,8 +511,10 @@ class GenerationService:
             # B. Generate Child Rows
             for child_idx, child_flat in enumerate(children_data):
                 child_row = {}
-                child_sku_val = child_flat.get(sku_col, f"{style_code}-CHILD-{child_idx}")
-                
+                # Use the Item Color value as the child SKU (e.g. "PGDNJS003295-LT. BLUE")
+                child_sku_val = child_flat.get("__child_sku__") or child_flat.get(item_color_col) or f"{style_code}-CHILD-{child_idx}"
+                child_sku_val = str(child_sku_val).strip()
+
                 child_row["product_type#1.value"] = resolved_ptd
                 child_row["::record_action"] = "Create or Replace (Full Update)"
                 child_row["contribution_sku#1.value"] = child_sku_val
@@ -678,9 +597,11 @@ class GenerationService:
                         for k, v in child_flat.items():
                             k_lower = k.strip().lower()
                             if k_lower in ["gender", "item_gender", "target_gender"]:
-                                gender_val = str(v).strip() if v is not None else ""
+                                if v is not None and str(v).strip().lower() not in ["", "(nil)", "nil", "n/a", "nan"]:
+                                    gender_val = str(v).strip()
                             elif k_lower in ["size", "footwear_size", "size_name", "item_size"]:
-                                size_val = str(v).strip() if v is not None else ""
+                                if v is not None and str(v).strip().lower() not in ["", "(nil)", "nil", "n/a", "nan"]:
+                                    size_val = str(v).strip()
                         val = normalize_department_name(gender_val, size_val)
                         source_type = "override"
 
@@ -688,8 +609,9 @@ class GenerationService:
                         gender_val = ""
                         for k, v in child_flat.items():
                             if k.strip().lower() in ["gender", "item_gender", "target_gender"]:
-                                gender_val = str(v).strip() if v is not None else ""
-                                break
+                                if v is not None and str(v).strip().lower() not in ["", "(nil)", "nil", "n/a", "nan"]:
+                                    gender_val = str(v).strip()
+                                    break
                         val = normalize_target_gender(gender_val)
                         source_type = "override"
 
@@ -697,8 +619,9 @@ class GenerationService:
                         size_val = ""
                         for k, v in child_flat.items():
                             if k.strip().lower() in ["size", "footwear_size", "size_name", "item_size"]:
-                                size_val = str(v).strip() if v is not None else ""
-                                break
+                                if v is not None and str(v).strip().lower() not in ["", "(nil)", "nil", "n/a", "nan"]:
+                                    size_val = str(v).strip()
+                                    break
                         v_val, _ = parse_bottoms_sizes(size_val)
                         if v_val:
                             val = v_val
@@ -708,8 +631,9 @@ class GenerationService:
                         size_val = ""
                         for k, v in child_flat.items():
                             if k.strip().lower() in ["size", "footwear_size", "size_name", "item_size"]:
-                                size_val = str(v).strip() if v is not None else ""
-                                break
+                                if v is not None and str(v).strip().lower() not in ["", "(nil)", "nil", "n/a", "nan"]:
+                                    size_val = str(v).strip()
+                                    break
                         _, r_val = parse_bottoms_sizes(size_val)
                         if r_val:
                             val = r_val
