@@ -2,6 +2,9 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 import re
 import shutil
+import zipfile
+import xml.etree.ElementTree as ET
+import os
 
 class ExcelProcessor:
     @staticmethod
@@ -29,12 +32,10 @@ class ExcelProcessor:
         if 'Valid Values' in wb.sheetnames:
             sheet_vv = wb['Valid Values']
             for row in sheet_vv.iter_rows(values_only=True):
-                # Check column 2 (index 1)
                 if len(row) > 1 and row[1]:
                     raw_label = str(row[1])
                     if " - [" in raw_label:
                         clean_lbl = cls.clean_label(raw_label)
-                        # The remaining cells in the row are valid values
                         allowed = [str(x).strip() for x in row[2:] if x is not None]
                         if allowed:
                             valid_values_map[clean_lbl] = allowed
@@ -159,36 +160,148 @@ class ExcelProcessor:
     def write_template(cls, template_path: str, output_path: str, generated_rows: list, sheet_info: dict):
         """
         Copies the Amazon template file and writes generated_rows into the Template sheet
-        starting at data_row. Each row is a dict of {tech_name: value}.
+        starting at data_row, modifying worksheet XML directly inside the ZIP archive.
+        Preserves 100% of macros, data validation extensions, drawings, relationships, and formatting.
         """
-        # Copy template to output path — preserves all formatting, header rows, sheets
         shutil.copy2(template_path, output_path)
 
-        wb = openpyxl.load_workbook(output_path)
-        if 'Template' not in wb.sheetnames:
-            wb.close()
-            raise ValueError("Template sheet not found in Amazon template file.")
+        sheet_target_rel = "xl/worksheets/sheet3.xml"
+        
+        with zipfile.ZipFile(output_path, 'r') as zin:
+            if "xl/workbook.xml" in zin.namelist():
+                wb_xml = zin.read("xl/workbook.xml")
+                wb_root = ET.fromstring(wb_xml)
+                ns_wb = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+                         'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'}
+                
+                rels_map = {}
+                if "xl/_rels/workbook.xml.rels" in zin.namelist():
+                    rels_xml = zin.read("xl/_rels/workbook.xml.rels")
+                    rels_root = ET.fromstring(rels_xml)
+                    for rel in rels_root.findall('{http://schemas.openxmlformats.org/package/2006/relationships}Relationship'):
+                        r_id = rel.get('Id')
+                        target = rel.get('Target')
+                        if r_id and target:
+                            rels_map[r_id] = target
 
-        ws = wb['Template']
+                for sheet in wb_root.findall('.//s:sheet', ns_wb):
+                    if sheet.get('name') == 'Template':
+                        r_id = sheet.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
+                        target = rels_map.get(r_id)
+                        if target:
+                            if not target.startswith('xl/'):
+                                target = 'xl/' + target
+                            sheet_target_rel = target
+                        break
 
-        attr_row_num = sheet_info.get("attribute_row", 5)
+            sheet_bytes = zin.read(sheet_target_rel)
+
+        namespaces = {
+            '': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+            'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+            'mc': 'http://schemas.openxmlformats.org/markup-compatibility/2006',
+            'x14ac': 'http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac'
+        }
+        for prefix, uri in namespaces.items():
+            ET.register_namespace(prefix, uri)
+
+        root = ET.fromstring(sheet_bytes)
+        ns = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+
+        attr_row_num = str(sheet_info.get("attribute_row", 5))
         data_row_start = sheet_info.get("data_row", 7)
 
-        # Build tech_name -> 1-based column index from the attribute row
+        sheetData = root.find('s:sheetData', ns)
+        if sheetData is None:
+            raise ValueError("sheetData element not found in Template worksheet XML.")
+
+        attr_row_elem = None
+        for r in sheetData.findall('s:row', ns):
+            if r.get('r') == attr_row_num:
+                attr_row_elem = r
+                break
+
         col_map = {}
-        for cell in ws[attr_row_num]:
-            if cell.value:
-                col_map[str(cell.value).strip()] = cell.column
+        if attr_row_elem is not None:
+            for c in attr_row_elem.findall('s:c', ns):
+                cell_ref = c.get('r')
+                col_letter = re.sub(r'\d+', '', cell_ref)
+                
+                val_text = None
+                v_elem = c.find('s:v', ns)
+                if v_elem is not None and v_elem.text:
+                    val_text = v_elem.text
+                else:
+                    t_elem = c.find('.//s:t', ns)
+                    if t_elem is not None and t_elem.text:
+                        val_text = t_elem.text
+                        
+                if val_text:
+                    col_map[str(val_text).strip()] = col_letter
 
-        # Write each generated row into the template
+        def get_or_create_row(r_num_str):
+            for r in sheetData.findall('s:row', ns):
+                if r.get('r') == r_num_str:
+                    return r
+            r_num_int = int(r_num_str)
+            new_r = ET.Element('row', {'r': r_num_str})
+            inserted = False
+            for idx, child in enumerate(list(sheetData)):
+                if child.tag.endswith('row'):
+                    curr_r_int = int(child.get('r', '0'))
+                    if curr_r_int > r_num_int:
+                        sheetData.insert(idx, new_r)
+                        inserted = True
+                        break
+            if not inserted:
+                sheetData.append(new_r)
+            return new_r
+
         for row_offset, row_data in enumerate(generated_rows):
-            excel_row = data_row_start + row_offset
-            for tech_name, value in row_data.items():
-                if tech_name.startswith("__"):
-                    continue  # skip internal keys like __child_sku__
-                col_idx = col_map.get(tech_name)
-                if col_idx is not None and value is not None:
-                    ws.cell(row=excel_row, column=col_idx, value=str(value))
+            target_r_num = data_row_start + row_offset
+            r_str = str(target_r_num)
+            row_elem = get_or_create_row(r_str)
 
-        wb.save(output_path)
-        wb.close()
+            for tech_name, value in row_data.items():
+                if tech_name.startswith("__") or value is None:
+                    continue
+                col_let = col_map.get(tech_name)
+                if not col_let:
+                    continue
+
+                cell_ref = f"{col_let}{r_str}"
+                
+                existing_c = None
+                for c in row_elem.findall('s:c', ns):
+                    if c.get('r') == cell_ref:
+                        existing_c = c
+                        break
+
+                if existing_c is None:
+                    existing_c = ET.SubElement(row_elem, 'c', {'r': cell_ref, 't': 'inlineStr'})
+                    is_elem = ET.SubElement(existing_c, 'is')
+                    t_elem = ET.SubElement(is_elem, 't')
+                    t_elem.text = str(value)
+                else:
+                    existing_c.set('t', 'inlineStr')
+                    for ch in list(existing_c):
+                        existing_c.remove(ch)
+                    is_elem = ET.SubElement(existing_c, 'is')
+                    t_elem = ET.SubElement(is_elem, 't')
+                    t_elem.text = str(value)
+
+        new_sheet_xml = ET.tostring(root, encoding='utf-8', xml_declaration=True)
+
+        tmp_zip = output_path + ".tmp.zip"
+        with zipfile.ZipFile(output_path, 'r') as zin:
+            with zipfile.ZipFile(tmp_zip, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    content = zin.read(item.filename)
+                    if item.filename == sheet_target_rel:
+                        zout.writestr(item, new_sheet_xml)
+                    else:
+                        zout.writestr(item, content)
+
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        shutil.move(tmp_zip, output_path)
