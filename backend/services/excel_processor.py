@@ -6,6 +6,15 @@ import zipfile
 import xml.etree.ElementTree as ET
 import os
 
+def col_to_index(col_str):
+    col_str = col_str.upper()
+    exp = 0
+    idx = 0
+    for char in reversed(col_str):
+        idx += (ord(char) - ord('A') + 1) * (26 ** exp)
+        exp += 1
+    return idx
+
 class ExcelProcessor:
     @staticmethod
     def clean_label(label):
@@ -161,7 +170,7 @@ class ExcelProcessor:
         """
         Copies the Amazon template file and writes generated_rows into the Template sheet
         starting at data_row (Row 7), modifying worksheet XML directly inside the ZIP package.
-        Resolves the exact Template worksheet target (xl/worksheets/sheet5.xml) and reads row 5 shared strings.
+        Enforces strict OpenXML ascending column order (A7, B7, C7...) so Excel never reports unreadable content.
         Preserves 100% of macros, data validation extensions, drawings, relationships, and formatting.
         """
         shutil.copy2(template_path, output_path)
@@ -307,6 +316,18 @@ class ExcelProcessor:
                     is_elem = ET.SubElement(existing_c, 'is')
                     t_elem = ET.SubElement(is_elem, 't')
                     t_elem.text = str(value)
+
+            # Enforce strict OpenXML column sorting (A, B, C, D...) so Excel never detects out-of-order cells
+            child_cells = list(row_elem.findall('s:c', ns))
+            if child_cells:
+                sorted_cells = sorted(
+                    child_cells,
+                    key=lambda cell: col_to_index(re.sub(r'\d+', '', cell.get('r', 'A1')))
+                )
+                for cell in child_cells:
+                    row_elem.remove(cell)
+                for cell in sorted_cells:
+                    row_elem.append(cell)
 
         new_sheet_xml = ET.tostring(root, encoding='utf-8', xml_declaration=True)
 
