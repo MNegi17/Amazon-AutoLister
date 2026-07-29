@@ -6,6 +6,14 @@ import zipfile
 import xml.etree.ElementTree as ET
 import os
 
+# Register OpenXML namespaces at global module level
+ET.register_namespace('', 'http://schemas.openxmlformats.org/spreadsheetml/2006/main')
+ET.register_namespace('r', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships')
+ET.register_namespace('mc', 'http://schemas.openxmlformats.org/markup-compatibility/2006')
+ET.register_namespace('x14ac', 'http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac')
+
+NS_MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+
 def col_to_index(col_str):
     col_str = col_str.upper()
     exp = 0
@@ -170,7 +178,7 @@ class ExcelProcessor:
         """
         Copies the Amazon template file and writes generated_rows into the Template sheet
         starting at data_row (Row 7), modifying worksheet XML directly inside the ZIP package.
-        Enforces strict OpenXML ascending column order (A7, B7, C7...) so Excel never reports unreadable content.
+        Enforces clean OpenXML default namespace elements and strict ascending column sorting (A7, B7, C7...).
         Preserves 100% of macros, data validation extensions, drawings, relationships, and formatting.
         """
         shutil.copy2(template_path, output_path)
@@ -191,7 +199,7 @@ class ExcelProcessor:
                         if r_id and target:
                             rels_map[r_id] = target
 
-                for sheet in wb_root.findall('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet'):
+                for sheet in wb_root.findall(f'.//{{{NS_MAIN}}}sheet'):
                     if sheet.get('name') == 'Template':
                         r_id = None
                         for k, v in sheet.attrib.items():
@@ -214,52 +222,40 @@ class ExcelProcessor:
             if "xl/sharedStrings.xml" in zin.namelist():
                 ss_bytes = zin.read("xl/sharedStrings.xml")
                 ss_root = ET.fromstring(ss_bytes)
-                ns_ss = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-                for si in ss_root.findall('s:si', ns_ss):
-                    t_vals = [t.text for t in si.findall('.//s:t', ns_ss) if t.text]
+                for si in ss_root.findall(f'{{{NS_MAIN}}}si'):
+                    t_vals = [t.text for t in si.findall(f'.//{{{NS_MAIN}}}t') if t.text]
                     shared_strings.append("".join(t_vals))
 
-        namespaces = {
-            '': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
-            'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
-            'mc': 'http://schemas.openxmlformats.org/markup-compatibility/2006',
-            'x14ac': 'http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac'
-        }
-        for prefix, uri in namespaces.items():
-            ET.register_namespace(prefix, uri)
-
         root = ET.fromstring(sheet_bytes)
-        ns = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
-
         attr_row_num = str(sheet_info.get("attribute_row", 5))
         data_row_start = sheet_info.get("data_row", 7)
 
-        sheetData = root.find('s:sheetData', ns)
+        sheetData = root.find(f'{{{NS_MAIN}}}sheetData')
         if sheetData is None:
             raise ValueError("sheetData element not found in Template worksheet XML.")
 
         attr_row_elem = None
-        for r in sheetData.findall('s:row', ns):
+        for r in sheetData.findall(f'{{{NS_MAIN}}}row'):
             if r.get('r') == attr_row_num:
                 attr_row_elem = r
                 break
 
         col_map = {}
         if attr_row_elem is not None:
-            for c in attr_row_elem.findall('s:c', ns):
+            for c in attr_row_elem.findall(f'{{{NS_MAIN}}}c'):
                 cell_ref = c.get('r')
                 col_letter = re.sub(r'\d+', '', cell_ref)
                 cell_type = c.get('t')
                 
                 val_text = None
-                v_elem = c.find('s:v', ns)
+                v_elem = c.find(f'{{{NS_MAIN}}}v')
                 val = v_elem.text if v_elem is not None else None
                 if cell_type == 's' and val and val.isdigit() and int(val) < len(shared_strings):
                     val_text = shared_strings[int(val)]
                 elif val:
                     val_text = val
                 else:
-                    t_elem = c.find('.//s:t', ns)
+                    t_elem = c.find(f'.//{{{NS_MAIN}}}t')
                     if t_elem is not None and t_elem.text:
                         val_text = t_elem.text
                         
@@ -267,11 +263,11 @@ class ExcelProcessor:
                     col_map[str(val_text).strip()] = col_letter
 
         def get_or_create_row(r_num_str):
-            for r in sheetData.findall('s:row', ns):
+            for r in sheetData.findall(f'{{{NS_MAIN}}}row'):
                 if r.get('r') == r_num_str:
                     return r
             r_num_int = int(r_num_str)
-            new_r = ET.Element('row', {'r': r_num_str})
+            new_r = ET.Element(f'{{{NS_MAIN}}}row', {'r': r_num_str})
             inserted = False
             for idx, child in enumerate(list(sheetData)):
                 if child.tag.endswith('row'):
@@ -299,26 +295,26 @@ class ExcelProcessor:
                 cell_ref = f"{col_let}{r_str}"
                 
                 existing_c = None
-                for c in row_elem.findall('s:c', ns):
+                for c in row_elem.findall(f'{{{NS_MAIN}}}c'):
                     if c.get('r') == cell_ref:
                         existing_c = c
                         break
 
                 if existing_c is None:
-                    existing_c = ET.SubElement(row_elem, 'c', {'r': cell_ref, 't': 'inlineStr'})
-                    is_elem = ET.SubElement(existing_c, 'is')
-                    t_elem = ET.SubElement(is_elem, 't')
+                    existing_c = ET.SubElement(row_elem, f'{{{NS_MAIN}}}c', {'r': cell_ref, 't': 'inlineStr'})
+                    is_elem = ET.SubElement(existing_c, f'{{{NS_MAIN}}}is')
+                    t_elem = ET.SubElement(is_elem, f'{{{NS_MAIN}}}t')
                     t_elem.text = str(value)
                 else:
                     existing_c.set('t', 'inlineStr')
                     for ch in list(existing_c):
                         existing_c.remove(ch)
-                    is_elem = ET.SubElement(existing_c, 'is')
-                    t_elem = ET.SubElement(is_elem, 't')
+                    is_elem = ET.SubElement(existing_c, f'{{{NS_MAIN}}}is')
+                    t_elem = ET.SubElement(is_elem, f'{{{NS_MAIN}}}t')
                     t_elem.text = str(value)
 
-            # Enforce strict OpenXML column sorting (A, B, C, D...) so Excel never detects out-of-order cells
-            child_cells = list(row_elem.findall('s:c', ns))
+            # Enforce strict OpenXML ascending column sorting (A, B, C, D...)
+            child_cells = list(row_elem.findall(f'{{{NS_MAIN}}}c'))
             if child_cells:
                 sorted_cells = sorted(
                     child_cells,
