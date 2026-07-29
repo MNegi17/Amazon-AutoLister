@@ -1,6 +1,7 @@
 import os
 import openpyxl
 import logging
+import re
 from collections import defaultdict
 from ..models import HardcodedDefault, LearnedMapping
 from .excel_processor import ExcelProcessor
@@ -39,6 +40,107 @@ def is_color_name_attribute(attr_name: str) -> bool:
         return False
     return name_lower.endswith(".value") and "standardized_values" not in name_lower and "color_map" not in name_lower
 
+def is_department_name_attribute(attr_name: str) -> bool:
+    name_lower = attr_name.lower()
+    return "department_name" in name_lower or (name_lower.startswith("department") and "name" in name_lower)
+
+def is_target_gender_attribute(attr_name: str) -> bool:
+    name_lower = attr_name.lower()
+    return "target_gender" in name_lower
+
+def is_bottoms_size_value_attribute(attr_name: str) -> bool:
+    name_lower = attr_name.lower()
+    return "bottoms_size" in name_lower and "value" in name_lower and "range" not in name_lower and "to" not in name_lower
+
+def is_bottoms_size_range_attribute(attr_name: str) -> bool:
+    name_lower = attr_name.lower()
+    return "bottoms_size" in name_lower and ("range" in name_lower or "to" in name_lower)
+
+def is_material_attribute(attr_name: str) -> bool:
+    name_lower = attr_name.lower()
+    return "material" in name_lower or "fabric" in name_lower
+
+def is_baby_size(size_val: str) -> bool:
+    if not size_val:
+        return False
+    s = str(size_val).upper().strip()
+    if "MONTH" in s or "MON" in s:
+        return True
+    if re.search(r'\b\d+[-\s]?\d*\s*M\b', s) or re.search(r'^\d+M$', s):
+        return True
+    if any(m in s for m in ["0-3", "3-6", "6-9", "9-12", "12-18", "18-24", "0-6M", "6-12M", "12-18M", "18-24M"]):
+        return True
+    return False
+
+def normalize_department_name(gender_val: str, size_val: str) -> str:
+    if not gender_val:
+        return "Unisex Kids"
+    g = str(gender_val).upper().strip()
+    is_baby = is_baby_size(size_val)
+
+    if "BOY" in g or "MALE" in g or "MEN" in g:
+        if "WOMEN" in g or "FEMALE" in g or "GIRL" in g:
+            return "Unisex Baby" if is_baby else "Unisex Kids"
+        if "MENS" in g or g == "MEN":
+            return "Mens"
+        return "Baby Boys" if is_baby else "Boys"
+
+    elif "GIRL" in g or "FEMALE" in g or "WOMEN" in g:
+        if "WOMENS" in g or g == "WOMEN":
+            return "Womens"
+        return "Baby Girls" if is_baby else "Girls"
+
+    elif "UNISEX" in g:
+        return "Unisex Baby" if is_baby else "Unisex Kids"
+
+    return "Unisex Kids"
+
+def normalize_target_gender(gender_val: str) -> str:
+    if not gender_val:
+        return "Unisex"
+    g = str(gender_val).upper().strip()
+    if "GIRL" in g or "FEMALE" in g or "WOMEN" in g or "WOMAN" in g:
+        return "Female"
+    elif "BOY" in g or "MALE" in g or "MEN" in g or "MAN" in g:
+        return "Male"
+    elif "UNISEX" in g:
+        return "Unisex"
+    return "Unisex"
+
+def parse_bottoms_sizes(size_val: str):
+    if not size_val:
+        return None, None
+    s = str(size_val).strip()
+    
+    # Check for range: e.g. "2-3Y", "2 - 3 Y", "3-6M", "3-6 MONTHS", "2-3 YEARS", "12-18M"
+    range_match = re.match(r'^(\d+)\s*[-\s]\s*(\d+)\s*([A-Za-z]+)?$', s)
+    if range_match:
+        n1, n2, unit = range_match.groups()
+        unit_str = "Years"
+        if unit:
+            u_upper = unit.upper()
+            if "M" in u_upper or "MON" in u_upper:
+                unit_str = "Months"
+            elif "Y" in u_upper or "YR" in u_upper:
+                unit_str = "Years"
+        elif int(n2) > 24 or (int(n1) <= 12 and int(n2) <= 24 and int(n1) > 0 and int(n2) - int(n1) <= 6):
+            unit_str = "Months"
+        return f"{n1} {unit_str}", f"{n2} {unit_str}"
+        
+    single_match = re.match(r'^(\d+)\s*([A-Za-z]+)?$', s)
+    if single_match:
+        n1, unit = single_match.groups()
+        unit_str = "Years"
+        if unit:
+            u_upper = unit.upper()
+            if "M" in u_upper or "MON" in u_upper:
+                unit_str = "Months"
+            elif "Y" in u_upper or "YR" in u_upper:
+                unit_str = "Years"
+        return f"{n1} {unit_str}", None
+
+    return s, None
+
 class GenerationService:
     @staticmethod
     def extract_style_code(sku):
@@ -48,7 +150,7 @@ class GenerationService:
         # Common convention: StyleCode-Color-Size. Let's split by '-' or '_'
         # e.g., PUCPPA003204-DK. GREEN -> PUCPPA003204
         # e.g., PGTOPS002848-LT. GREEN -> PGTOPS002848
-        parts = re_split = [x for x in sku_str.replace("_", "-").split("-") if x]
+        parts = [x for x in sku_str.replace("_", "-").split("-") if x]
         if parts:
             return parts[0]
         return sku_str
@@ -83,17 +185,15 @@ class GenerationService:
             
         # Parse SKU input
         input_tokens = [x.strip() for x in skus_input.replace("\n", ",").split(",") if x.strip()]
-        log(f"🔍 Searching for {len(input_tokens)} style code(s): {', '.join(input_tokens)}")
+        log(f"🔍 Searching for {len(input_tokens)} style code(s)/variant(s): {', '.join(input_tokens)}")
         
         # 1. Match and resolve child rows from source sheets
-        # Find which column in item_dir is the SKU/Item Code column
         sku_col = None
         style_col = None
         sample_row = item_dir[0]
 
         # --- Step 0: Database-learned mappings lookup ---
         from ..models import LearnedMapping
-        # Look up SKU columns in order of preference
         sku_attrs = [
             "contribution_sku#1.value",
             "amzn1.volt.ca.product_id_value",
@@ -121,7 +221,7 @@ class GenerationService:
             if col_key in sample_row:
                 style_col = col_key
 
-        # --- Step 1: SKU Column Name-based fallback (Highly reliable standard names) ---
+        # --- Step 1: SKU Column Name-based fallback ---
         if not sku_col:
             for k in sample_row.keys():
                 k_clean = str(k).strip().lower()
@@ -130,40 +230,13 @@ class GenerationService:
                     break
 
         # --- Step 2: SKU Column Format-based fallback ---
-        # If still no sku_col, find a column whose values look like SKU codes (letters+digits with dash)
         if not sku_col:
-            import re
             sku_pattern = re.compile(r'^[A-Z]{2,}[0-9]{4,}-[A-Z]', re.IGNORECASE)
             for k in sample_row.keys():
                 v = sample_row.get(k)
                 if v and sku_pattern.match(str(v).strip()):
                     sku_col = k
                     break
-
-        # --- Step 3: SKU Column Token-driven discovery (stratified sample fallback) ---
-        # Sample rows from start, middle and end to cover the full file.
-        # This finds which column ACTUALLY contains values matching user's input tokens.
-        if not sku_col and input_tokens:
-            total = len(item_dir)
-            # Build a stratified sample of up to 2000 rows spread across the file
-            step = max(1, total // 2000)
-            scan_rows = item_dir[::step][:2000]
-
-            col_hit_counts: dict = {}
-            for token in input_tokens:
-                token_lower = token.strip().lower()
-                # Extract style-code prefix: PBTSHS002794 from PBTSHS002794-BLACK
-                token_prefix = token_lower.split("-")[0]
-                for row in scan_rows:
-                    for col_k, col_v in row.items():
-                        if col_v is not None:
-                            v_str = str(col_v).strip().lower()
-                            if token_lower == v_str or v_str.startswith(token_prefix):
-                                col_hit_counts[col_k] = col_hit_counts.get(col_k, 0) + 1
-
-            if col_hit_counts:
-                best_col = max(col_hit_counts, key=lambda c: col_hit_counts[c])
-                sku_col = best_col
 
         # Final default SKU column fallback
         if not sku_col:
@@ -176,7 +249,6 @@ class GenerationService:
                 style_col = k
                 break
 
-        # --- Step B: Style Code name-based fallback (item name, style group, etc.) ---
         if not style_col:
             for k in sample_row.keys():
                 k_clean = str(k).strip().lower()
@@ -184,41 +256,71 @@ class GenerationService:
                     style_col = k
                     break
 
-        # --- Step C: Style Code pattern-based fallback ---
-        if not style_col:
-            for k in sample_row.keys():
-                k_clean = str(k).strip().lower()
-                if any(x in k_clean for x in ["style_code", "style code", "style_no", "article"]):
-                    if not any(noise in k_clean for noise in ["group", "name", "category", "desc", "brand"]):
-                        style_col = k
-                        break
-
-        # Column detection complete (internal)
-        
+        # ROBUST MATCHING ENGINE: Precision matching without skipping or false positives
         matched_child_items = []
         for token in input_tokens:
-            token_str = str(token).strip().lower()
-            token_prefix = token_str.split("-")[0]
+            token_str = str(token).strip()
+            if not token_str:
+                continue
+            token_lower = token_str.lower()
+            
             matches = []
             for row in item_dir:
-                sku_val = str(row.get(sku_col, "")).strip().lower()
-                style_val = str(row.get(style_col, "")).strip().lower() if style_col else ""
+                sku_val = str(row.get(sku_col, "")).strip() if sku_col else ""
+                style_val = str(row.get(style_col, "")).strip() if style_col else ""
+                sku_lower = sku_val.lower()
+                style_lower = style_val.lower()
                 
-                # Check for exact or prefix matches in guessed columns
-                if (token_str == sku_val or token_str == style_val or
-                        sku_val.startswith(token_prefix) or style_val.startswith(token_prefix)):
+                # Check 1: Exact match on SKU or Style
+                if token_lower == sku_lower or token_lower == style_lower:
                     matches.append(row)
-                else:
-                    # Fallback: search all columns
-                    found = False
-                    for col_name, val in row.items():
-                        if val is not None:
-                            val_str = str(val).strip().lower()
-                            if token_str == val_str or val_str.startswith(token_prefix):
-                                found = True
+                    continue
+
+                # Check 2: Exact prefix match on SKU (e.g. "PGDNJS003295-LT. BLUE" matches "PGDNJS003295-LT. BLUE-2-3Y")
+                if sku_lower and (sku_lower.startswith(token_lower) or sku_lower.replace(" ", "").startswith(token_lower.replace(" ", ""))):
+                    matches.append(row)
+                    continue
+
+                # Check 3: Style-Color combo (e.g. "PGDNJS003295-LT. BLUE")
+                if "-" in token_str:
+                    parts = [p.strip() for p in token_str.split("-") if p.strip()]
+                    if len(parts) >= 2:
+                        s_part = parts[0].lower()
+                        c_part = "-".join(parts[1:]).lower()
+                        
+                        style_matched = (style_lower == s_part) or (sku_lower.startswith(s_part))
+                        
+                        row_color = ""
+                        for k, v in row.items():
+                            if k.strip().lower() in ["color", "color_name", "item_color", "item color"]:
+                                row_color = str(v).strip().lower() if v is not None else ""
                                 break
-                    if found:
-                        matches.append(row)
+                                
+                        color_matched = (
+                            (c_part in sku_lower) or 
+                            (c_part.replace(" ", "") in sku_lower.replace(" ", "")) or
+                            (row_color and (c_part == row_color or c_part in row_color or row_color in c_part))
+                        )
+                        
+                        if style_matched and color_matched:
+                            matches.append(row)
+                            continue
+
+                # Check 4: Fallback style match if token is purely a style code with no color specified
+                if style_lower and (style_lower == token_lower or sku_lower.startswith(token_lower + "-")):
+                    matches.append(row)
+                    continue
+
+                # Check 5: Search all columns for exact token string
+                found = False
+                for col_name, val in row.items():
+                    if val is not None:
+                        val_str = str(val).strip().lower()
+                        if token_lower == val_str:
+                            found = True
+                            break
+                if found:
+                    matches.append(row)
                         
             if matches:
                 matched_child_items.extend(matches)
@@ -239,14 +341,12 @@ class GenerationService:
             raise ValueError("No matching products found in Item Directory for the inputted SKUs.")
 
         # Get learned SKU column if available
-        from ..models import LearnedMapping
         learned_sku_col = None
         m_sku = db.query(LearnedMapping).filter(LearnedMapping.amazon_attribute == "contribution_sku#1.value", LearnedMapping.is_active == True).first()
         if m_sku:
             learned_sku_col = m_sku.internal_column
 
         # 2. Enrich child rows with joins from Master & Content sheets
-        # Pre-build indices to speed up joins from O(N*M*C) to O(M*C + N)
         master_index = {}
         for m_row in master_sheet:
             for mk, mv in m_row.items():
@@ -268,7 +368,6 @@ class GenerationService:
             sku_val = str(c_row.get(sku_col)).strip()
             sku_val_lower = sku_val.lower()
             
-            # Extract parent style code smartly
             sku_for_style = sku_val
             if learned_sku_col and c_row.get(learned_sku_col) is not None:
                 sku_for_style = str(c_row.get(learned_sku_col)).strip()
@@ -281,7 +380,6 @@ class GenerationService:
             
             if not style_val:
                 extracted = cls.extract_style_code(sku_for_style)
-                # Look for another column holding this exact value (like ITEM NAME holding style)
                 found_col = None
                 for k, v in c_row.items():
                     if v is not None and str(v).strip().lower() == extracted.lower():
@@ -292,7 +390,6 @@ class GenerationService:
                 else:
                     style_val = extracted
             
-            # Fallback if style_val resolved to EAN barcode or matches sku_val
             is_barcode = style_val.isdigit() and len(style_val) in [12, 13, 14]
             if style_val == sku_val or is_barcode:
                 best_style = None
@@ -302,7 +399,6 @@ class GenerationService:
                         parts = [x for x in v_str.replace("_", "-").split("-") if x]
                         if parts:
                             possible_style = parts[0].strip()
-                            # Check if this possible_style matches any other column's value exactly
                             matched_any = False
                             for k2, v2 in c_row.items():
                                 if v2 is not None and str(v2).strip().lower() == possible_style.lower():
@@ -320,17 +416,14 @@ class GenerationService:
             
             style_val_lower = style_val.lower() if style_val else None
             
-            # Combine child attributes
             flat_item = dict(c_row)
             
-            # Join with Master Sheet
             m_matched = master_index.get(sku_val_lower) or (master_index.get(style_val_lower) if style_val_lower else None)
             if m_matched:
                 for k, v in m_matched.items():
                     if k not in flat_item or flat_item[k] is None:
                         flat_item[k] = v
                         
-            # Join with Content Sheet
             c_matched = content_index.get(sku_val_lower) or (content_index.get(style_val_lower) if style_val_lower else None)
             if c_matched:
                 for k, v in c_matched.items():
@@ -347,32 +440,27 @@ class GenerationService:
         # 4. Generate Rows for the Amazon Template
         generated_rows = []
         
-        # Pre-fetch all rules, defaults, and mappings to avoid N+1 database queries
         from ..models import AdminRule, HardcodedDefault, LearnedMapping, ValueMapping
         admin_rules = db.query(AdminRule).all()
         hardcoded_defaults = db.query(HardcodedDefault).all()
         learned_mappings = db.query(LearnedMapping).all()
         value_mappings = db.query(ValueMapping).all()
         
-        # Group admin rules by (amazon_attribute, scope, scope_value)
         rules_cache = {}
         for r in admin_rules:
             key = (r.amazon_attribute, r.scope, r.scope_value)
             rules_cache[key] = r
             
-        # Index active defaults by amazon_attribute
         defaults_cache = {}
         for d in hardcoded_defaults:
             if d.is_active:
                 defaults_cache[d.amazon_attribute] = d
                 
-        # Index active mappings by amazon_attribute
         mappings_cache = {}
         for m in learned_mappings:
             if m.is_active:
                 mappings_cache[m.amazon_attribute] = m
                 
-        # Group value mappings by (amazon_attribute, internal_value)
         value_mappings_cache = {}
         for v in value_mappings:
             key = (v.amazon_attribute, v.internal_value)
@@ -385,13 +473,11 @@ class GenerationService:
             "value_mappings": value_mappings_cache
         }
         
-        # We need to resolve the Product Type. Let's look up if there's a default in db
-        resolved_ptd = "SHIRT" # default fallback
+        resolved_ptd = "SHIRT"
         ptd_default = defaults_cache.get("product_type#1.value")
         if ptd_default and ptd_default.is_active:
             resolved_ptd = ptd_default.default_value
             
-        # If the template's AttributePTDMAP doesn't support the resolved PTD, fall back to the template's PTD
         if ptd_mappings:
             if resolved_ptd not in ptd_mappings:
                 available_ptds = list(ptd_mappings.keys())
@@ -402,14 +488,11 @@ class GenerationService:
                             matched_ptd = aptd
                             break
                     resolved_ptd = matched_ptd or available_ptds[0]
-                    pass  # Fallback PTD resolved internally
             
-        # Get list of unlocked attributes for this Product Type
         unlocked_attrs = ptd_mappings.get(resolved_ptd, [])
         log(f"🏷 Product Type: {resolved_ptd} — {len(unlocked_attrs)} fields unlocked for this template.")
         
         for style_code, children_data in style_groups.items():
-            # Tracking variables for user-friendly summary logging
             resolved_title = None
             resolved_desc = None
             bullet_points_count = 0
@@ -419,14 +502,10 @@ class GenerationService:
             parent_sku = f"{style_code}-$P"
             parent_row = {}
             
-            # VERY IMPORTANT AMAZON RULE:
-            # Step 1: Set Product Type & Listing Action first
             parent_row["product_type#1.value"] = resolved_ptd
             parent_row["::record_action"] = "Create or Replace (Full Update)"
             parent_row["contribution_sku#1.value"] = parent_sku
             
-            # Set parent relationship fields
-            # Find exact technical name for parentage level & variation theme
             parentage_attr = None
             theme_attr = None
             parent_sku_attr = None
@@ -447,25 +526,20 @@ class GenerationService:
             if theme_attr:
                 parent_row[theme_attr] = "SIZE/COLOR"
                 
-            # For parent, populate other applicable fields from the first child's data
             sample_child = children_data[0]
             
             for attr, attr_info in attributes_meta.items():
-                # Skip basic keys already set
                 if attr in ["product_type#1.value", "::record_action", "contribution_sku#1.value", parentage_attr, theme_attr, parent_sku_attr, relationship_type_attr]:
                     continue
                     
-                # Skip attributes that are locked for this PTD (if conditional attribute)
                 is_conditional = any(attr in attrs for attrs in ptd_mappings.values())
                 if is_conditional and attr not in unlocked_attrs:
                     continue
                     
-                # Skip variation attributes that MUST be blank on Parent row
                 is_variation_field = any(x in attr.lower() for x in ["size", "color", "price", "product_id", "external_product_information", "barcode"])
                 if is_variation_field:
                     continue
                     
-                # Resolve value using Rule Engine
                 val, source_type, score = RuleEngine.resolve_attribute_value(
                     db, attr, sample_child, product_type=resolved_ptd, brand=sample_child.get("Brand"), category=sample_child.get("Category"), rules_lookup=rules_lookup
                 )
@@ -488,9 +562,40 @@ class GenerationService:
                     if val is not None:
                         val = str(val).title()
                         source_type = "override"
+
+                elif is_department_name_attribute(attr):
+                    gender_val = ""
+                    size_val = ""
+                    for k, v in sample_child.items():
+                        k_lower = k.strip().lower()
+                        if k_lower in ["gender", "item_gender", "target_gender"]:
+                            gender_val = str(v).strip() if v is not None else ""
+                        elif k_lower in ["size", "footwear_size", "size_name", "item_size"]:
+                            size_val = str(v).strip() if v is not None else ""
+                    val = normalize_department_name(gender_val, size_val)
+                    source_type = "override"
+
+                elif is_target_gender_attribute(attr):
+                    gender_val = ""
+                    for k, v in sample_child.items():
+                        if k.strip().lower() in ["gender", "item_gender", "target_gender"]:
+                            gender_val = str(v).strip() if v is not None else ""
+                            break
+                    val = normalize_target_gender(gender_val)
+                    source_type = "override"
+
+                elif is_material_attribute(attr):
+                    fabric_val = ""
+                    for k, v in sample_child.items():
+                        if k.strip().lower() in ["fabric", "fabric_type", "material", "composition", "fabric composition"]:
+                            fabric_val = str(v).strip() if v is not None else ""
+                            break
+                    if fabric_val:
+                        val = fabric_val
+                        source_type = "override"
+
                 if val is not None:
                     if "bullet_point" in attr.lower():
-                        import re
                         bullet_match = re.search(r'#(\d+)\.value', attr)
                         if bullet_match:
                             bullet_idx = int(bullet_match.group(1))
@@ -515,7 +620,6 @@ class GenerationService:
                 child_row = {}
                 child_sku_val = child_flat.get(sku_col, f"{style_code}-CHILD-{child_idx}")
                 
-                # Step 1: Set Product Type & Listing Action first
                 child_row["product_type#1.value"] = resolved_ptd
                 child_row["::record_action"] = "Create or Replace (Full Update)"
                 child_row["contribution_sku#1.value"] = child_sku_val
@@ -529,7 +633,6 @@ class GenerationService:
                 if relationship_type_attr:
                     child_row[relationship_type_attr] = "Variation"
                     
-                # Populate remaining attributes
                 for attr, attr_info in attributes_meta.items():
                     if attr in [
                         "product_type#1.value", "::record_action", "contribution_sku#1.value",
@@ -537,12 +640,10 @@ class GenerationService:
                     ]:
                         continue
                         
-                    # Skip locked attributes (if conditional attribute)
                     is_conditional = any(attr in attrs for attrs in ptd_mappings.values())
                     if is_conditional and attr not in unlocked_attrs:
                         continue
                         
-                    # Resolve value using Rule Engine
                     val, source_type, score = RuleEngine.resolve_attribute_value(
                         db, attr, child_flat, product_type=resolved_ptd, brand=child_flat.get("Brand"), category=child_flat.get("Category"), rules_lookup=rules_lookup
                     )
@@ -594,9 +695,62 @@ class GenerationService:
                         if c_val:
                             val = c_val.title()
                             source_type = "override"
+
+                    elif is_department_name_attribute(attr):
+                        gender_val = ""
+                        size_val = ""
+                        for k, v in child_flat.items():
+                            k_lower = k.strip().lower()
+                            if k_lower in ["gender", "item_gender", "target_gender"]:
+                                gender_val = str(v).strip() if v is not None else ""
+                            elif k_lower in ["size", "footwear_size", "size_name", "item_size"]:
+                                size_val = str(v).strip() if v is not None else ""
+                        val = normalize_department_name(gender_val, size_val)
+                        source_type = "override"
+
+                    elif is_target_gender_attribute(attr):
+                        gender_val = ""
+                        for k, v in child_flat.items():
+                            if k.strip().lower() in ["gender", "item_gender", "target_gender"]:
+                                gender_val = str(v).strip() if v is not None else ""
+                                break
+                        val = normalize_target_gender(gender_val)
+                        source_type = "override"
+
+                    elif is_bottoms_size_value_attribute(attr):
+                        size_val = ""
+                        for k, v in child_flat.items():
+                            if k.strip().lower() in ["size", "footwear_size", "size_name", "item_size"]:
+                                size_val = str(v).strip() if v is not None else ""
+                                break
+                        v_val, _ = parse_bottoms_sizes(size_val)
+                        if v_val:
+                            val = v_val
+                            source_type = "override"
+
+                    elif is_bottoms_size_range_attribute(attr):
+                        size_val = ""
+                        for k, v in child_flat.items():
+                            if k.strip().lower() in ["size", "footwear_size", "size_name", "item_size"]:
+                                size_val = str(v).strip() if v is not None else ""
+                                break
+                        _, r_val = parse_bottoms_sizes(size_val)
+                        if r_val:
+                            val = r_val
+                            source_type = "override"
+
+                    elif is_material_attribute(attr):
+                        fabric_val = ""
+                        for k, v in child_flat.items():
+                            if k.strip().lower() in ["fabric", "fabric_type", "material", "composition", "fabric composition"]:
+                                fabric_val = str(v).strip() if v is not None else ""
+                                break
+                        if fabric_val:
+                            val = fabric_val
+                            source_type = "override"
+
                     if val is not None:
                         if "bullet_point" in attr.lower():
-                            import re
                             bullet_match = re.search(r'#(\d+)\.value', attr)
                             if bullet_match:
                                 bullet_idx = int(bullet_match.group(1))
@@ -611,7 +765,6 @@ class GenerationService:
                         
                 generated_rows.append(child_row)
                 
-                # Track variant details for log summary
                 child_size = "N/A"
                 child_color = "N/A"
                 for k, v in child_flat.items():
@@ -627,7 +780,6 @@ class GenerationService:
                     "color": child_color
                 })
 
-            # Print friendly user-facing summary for this style group
             log(f"✅ Resolved & Generated Listing for Style '{style_code}':")
             if resolved_title:
                 log(f"   • Product Title: \"{resolved_title}\"")
@@ -644,54 +796,19 @@ class GenerationService:
             log(f"   • Child Variants ({len(child_variants_info)} items):")
             for c_info in child_variants_info:
                 log(f"     - SKU: {c_info['sku']} (Size: {c_info['size']}, Color: {c_info['color']})")
-            log("")  # Empty line for padding
+            log("")
 
         log("🔎 Validating all generated rows against Amazon requirements...")
         val_report = ValidationService.validate_listings(generated_rows, attributes_meta, ptd_mappings)
-        if val_report["errors_count"] == 0:
-            log(f"✅ Validation passed — {val_report['warnings_count']} warning(s).")
-        else:
-            log(f"⚠ Validation found {val_report['errors_count']} error(s) and {val_report['warnings_count']} warning(s).")
         
-        # 5. Write to Template Sheet and Save
-        log("📝 Writing data into the Amazon template file...")
+        # Save populated template
+        log("💾 Writing populated rows to Amazon Excel template...")
+        ExcelProcessor.write_template(template_path, output_path, generated_rows, sheet_info)
         
-        # Open template with keep_vba=True
-        wb_write = openpyxl.load_workbook(template_path, keep_vba=True)
-        sheet_write = wb_write['Template']
-        
-        # Start writing at data_row
-        start_row = sheet_info.get("data_row", 7)
-        
-        # Clear existing data rows if any (up to row 500)
-        for r_idx in range(start_row, max(start_row + len(generated_rows) + 50, sheet_write.max_row + 1)):
-            for c_idx in range(1, sheet_write.max_column + 1):
-                sheet_write.cell(row=r_idx, column=c_idx).value = None
-                
-        # Write new generated rows
-        for r_idx, row_data in enumerate(generated_rows):
-            target_row = start_row + r_idx
-            for attr, val in row_data.items():
-                if attr in attributes_meta:
-                    col_idx = attributes_meta[attr]["column_index"]
-                    # openpyxl columns are 1-indexed
-                    sheet_write.cell(row=target_row, column=col_idx + 1).value = val
-                    
-        log(f"Saving completed template to output file: {output_path}")
-        # Ensure output directory exists
-        out_dir = os.path.dirname(output_path)
-        if out_dir and not os.path.exists(out_dir):
-            os.makedirs(out_dir, exist_ok=True)
-            
-        wb_write.save(output_path)
-        wb_write.close()
-        log("Listing generation successfully finished!")
-        
+        log(f"🎉 Success! Amazon listing generated at: {output_path}")
         return {
-            "status": "success",
+            "output_path": output_path,
             "total_rows": len(generated_rows),
-            "parent_rows": len(style_groups),
-            "child_rows": len(joined_items),
-            "validation": val_report,
-            "output_file": output_path
+            "parent_styles": len(style_groups),
+            "validation_report": val_report
         }
