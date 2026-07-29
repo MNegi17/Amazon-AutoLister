@@ -160,19 +160,17 @@ class ExcelProcessor:
     def write_template(cls, template_path: str, output_path: str, generated_rows: list, sheet_info: dict):
         """
         Copies the Amazon template file and writes generated_rows into the Template sheet
-        starting at data_row, modifying worksheet XML directly inside the ZIP archive.
+        starting at data_row (Row 7), modifying worksheet XML directly inside the ZIP package.
+        Resolves the exact Template worksheet target (xl/worksheets/sheet5.xml) and reads row 5 shared strings.
         Preserves 100% of macros, data validation extensions, drawings, relationships, and formatting.
         """
         shutil.copy2(template_path, output_path)
 
-        sheet_target_rel = "xl/worksheets/sheet3.xml"
-        
+        sheet_target_rel = None
         with zipfile.ZipFile(output_path, 'r') as zin:
             if "xl/workbook.xml" in zin.namelist():
                 wb_xml = zin.read("xl/workbook.xml")
                 wb_root = ET.fromstring(wb_xml)
-                ns_wb = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
-                         'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'}
                 
                 rels_map = {}
                 if "xl/_rels/workbook.xml.rels" in zin.namelist():
@@ -184,9 +182,13 @@ class ExcelProcessor:
                         if r_id and target:
                             rels_map[r_id] = target
 
-                for sheet in wb_root.findall('.//s:sheet', ns_wb):
+                for sheet in wb_root.findall('.//{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet'):
                     if sheet.get('name') == 'Template':
-                        r_id = sheet.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
+                        r_id = None
+                        for k, v in sheet.attrib.items():
+                            if 'id' in k.lower() and k != 'sheetId':
+                                r_id = v
+                                break
                         target = rels_map.get(r_id)
                         if target:
                             if not target.startswith('xl/'):
@@ -194,7 +196,19 @@ class ExcelProcessor:
                             sheet_target_rel = target
                         break
 
+        if not sheet_target_rel:
+            sheet_target_rel = "xl/worksheets/sheet5.xml"
+
+        with zipfile.ZipFile(output_path, 'r') as zin:
             sheet_bytes = zin.read(sheet_target_rel)
+            shared_strings = []
+            if "xl/sharedStrings.xml" in zin.namelist():
+                ss_bytes = zin.read("xl/sharedStrings.xml")
+                ss_root = ET.fromstring(ss_bytes)
+                ns_ss = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+                for si in ss_root.findall('s:si', ns_ss):
+                    t_vals = [t.text for t in si.findall('.//s:t', ns_ss) if t.text]
+                    shared_strings.append("".join(t_vals))
 
         namespaces = {
             '': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
@@ -226,11 +240,15 @@ class ExcelProcessor:
             for c in attr_row_elem.findall('s:c', ns):
                 cell_ref = c.get('r')
                 col_letter = re.sub(r'\d+', '', cell_ref)
+                cell_type = c.get('t')
                 
                 val_text = None
                 v_elem = c.find('s:v', ns)
-                if v_elem is not None and v_elem.text:
-                    val_text = v_elem.text
+                val = v_elem.text if v_elem is not None else None
+                if cell_type == 's' and val and val.isdigit() and int(val) < len(shared_strings):
+                    val_text = shared_strings[int(val)]
+                elif val:
+                    val_text = val
                 else:
                     t_elem = c.find('.//s:t', ns)
                     if t_elem is not None and t_elem.text:

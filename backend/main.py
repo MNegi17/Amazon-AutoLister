@@ -56,7 +56,7 @@ def root():
 @app.get("/version")
 def version():
     return {
-        "build": "2026-07-29-v8",
+        "build": "2026-07-29-v9",
         "matching": "item_color_column_exact",
         "fixes": ["sku_matching", "department_name", "target_gender", "bottoms_size", "material"]
     }
