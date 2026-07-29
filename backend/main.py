@@ -56,7 +56,7 @@ def root():
 @app.get("/version")
 def version():
     return {
-        "build": "2026-07-29-v6",
+        "build": "2026-07-29-v7",
         "matching": "item_color_column_exact",
         "fixes": ["sku_matching", "department_name", "target_gender", "bottoms_size", "material"]
     }
@@ -411,7 +411,7 @@ def run_generation_task(
         task.progress = 100
         task.status = "completed"
         task.output_file_path = output_path
-        task.validation_report = json.dumps(result["validation"])
+        task.validation_report = json.dumps(result.get("validation_report", result.get("validation", {})))
         task.completed_at = datetime.datetime.utcnow()
         task_log("🎉 All listings generated! Your file is ready to download.")
 
